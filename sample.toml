@@ -1,0 +1,27 @@
+# store.toml
+# Used only during `store init` and `store rewrite`
+
+[disk]
+# Total size of the disk file to create
+size = "1GB"
+# Name of the disk file (relative or absolute path)
+name = "store.disk"
+
+
+[storage]
+# Intended usage profile:
+#   - "largefiles"  → few very large files
+#   - "balanced"    → general purpose (default)
+#   - "smallfiles"  → many small files
+profile = "balanced"
+
+
+[policy]
+# Data compression policy (applied at write time)
+# Currently supported: "off", "lz4" 'Is global by default if enabled'
+compression = "off"
+
+
+[layout]
+# Logical block size (must be power of two)
+block_size = "4KB"
