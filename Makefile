@@ -1,7 +1,7 @@
 # Makefile for the store project
 
 CC := gcc
-CFLAGS := -std=c11 -Wall -Wextra -Wshadow -Wpedantic -O2 -g
+CFLAGS := -std=c11 -Wall -Wextra -Wshadow -Wpedantic -O2 -g -D_POSIX_C_SOURCE=200809L
 LDFLAGS :=
 LDLIBS :=
 

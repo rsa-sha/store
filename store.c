@@ -24,6 +24,8 @@ int read_config(char *file) {
 
 
 uint64_t parse_size(const char *s) {
+    // TODO: Only takes int val if end alpha val is not in the list [MB|KB|GB]
+    // if I do -ds 1G => size will be 1 byte instead of 1GB or whatever intended
     char *end;
     uint64_t val = strtoull(s, &end, 10);
 
@@ -76,6 +78,12 @@ int fill_config(char *file) {
             strcpy(config.usage, profile.u.s);
         }
     }
+    toml_table_t *layout = toml_table_in(conf, "layout");
+    if (layout) {
+        toml_datum_t bs = toml_string_in(layout, "block_size");
+        if (bs.ok)
+            config.block_size = parse_size(bs.u.s);
+    }
     return 0;
 }
 
@@ -102,11 +110,21 @@ int init_config(int argc, char **argv) {
                 strcpy(config.disk_name, argv[i+1]);
         }
     }
+    // to be used for No. of inodes calculation
+    if (strcasecmp(config.usage, "largefile")) {
+        config.ratio = LARGE;
+    } else if (strcasecmp(config.usage, "smallfiles")) {
+        config.ratio = SMALL;
+    } else {
+        config.ratio = BALANCED;
+    }
     printf("Config:\n");
-    printf("\t config.compression - %d\n", config.compression);
-    printf("\t config.disk_size - %ld\n", config.disk_size);
-    printf("\t config.disk_name - %s\n", config.disk_name);
-    printf("\t config.usage - %s\n", config.usage);
+    printf("\t%-20s - %-10d\n", "config.compression", config.compression);
+    printf("\t%-20s - %-10ld\n", "config.disk_size", config.disk_size);
+    printf("\t%-20s - %-10s\n", "config.disk_name", config.disk_name);
+    printf("\t%-20s - %-10s\n", "config.usage", config.usage);
+    printf("\t%-20s - %-10d\n", "config.block_size", config.block_size);
+    printf("\t%-20s - %-10d\n", "config.ratio", config.ratio);
     if (config.disk_size == 0) {
         printf("Disk size cannot be zero\n");
         return -1;
@@ -114,13 +132,131 @@ int init_config(int argc, char **argv) {
     return 0;
 }
 
+// Assumes that config is there [init_config], populates SUPERBLOCK & INODES for use
+int command_init() {
+    // only runs when user does `store init ...`
+    // based on the conf creates disk file in exec-dir and inits it
+    // creating the file
+    int fd = open(config.disk_name, O_RDWR | O_CREAT | O_EXCL, 0644);
+    if (fd < 0) {
+        perror("Unable to create disk file\n");
+        return 1;
+    }
+    // allocating size to disk file
+
+    if (ftruncate(fd, config.disk_size)!=0){
+        perror("ftruncate err\n");
+        return 1;
+    }
+
+    /*
+    config.ratio specifies the inode ratio as a constant (n_inodes).
+    This ratio is divided by 1000 to get the percentage of disk size used for inodes.
+    Example:
+        ratio       [SMALL]         -> 40
+        multiplier  [ratio / 1000]  -> 0.04
+        disk_size   [4096MB]        -> 4294967296   [4096 * 1024 * 1024]
+        ----------------------------------------------------------------
+        To calculate available space for inodes, we subtract the size of the superblock:
+        Available Space = disk_size - sizeof(struct store_super_block)
+        Let's assume sizeof(store_super_block) = 4KB -> 4096 bytes
+            Available Space = 4294967296 - 4096 -> 4294963200 bytes
+        Space allocated for inodes = Available Space * multiplier
+            Space for inodes = 4294963200 * 0.04 -> 171798528 bytes (~163 MB)
+        We round down this number to the nearest multiple of sizeof(store_inode) to get
+        the final amount of space allocated for inodes.
+
+    Note:
+        - The size of `store_super_block` and `store_inode` are system-dependent
+          (typically defined as structures in the file system).
+    */
+
+    uint64_t disk_avail = config.disk_size - sizeof(struct store_super_block);
+    uint64_t inode_space = (disk_avail * config.ratio)/1000;
+    uint32_t n_inodes = (inode_space/sizeof(struct store_inode));
+    // super_block
+    struct store_super_block sb = {0};
+    sb.magic = STORE_MAGIC;
+    sb.version = 0;                     // first config
+    sb.flags = 0;                       // no features enabled
+    sb.disk_size = config.disk_size;
+    sb.block = config.block_size ? config.block_size:4096;
+    sb.inode_start = 1;                 // 0 reserver for SB
+    sb.inode_end = sb.inode_start + n_inodes - 1;
+    sb.data_start = sb.inode_end + 1;
+    sb.compression = config.compression;
+    sb.checksum = 0;                    // unused for now
+    sb.sb_cksum = 0;                    // unused for now
+    sb.reserved = 0;                    // unused for now
+
+    // Set compression bit in flag if enabled disk-wide
+    if (sb.compression != 0)
+        sb.flags = sb.flags | FLAG_COMPRESSION;
+
+    // padded superblock
+    char *sb_block = malloc(sb.block);
+    if (sb_block==NULL) {
+        printf("Unable to alloc mem to block");
+        close(fd);
+        return 1;
+    }
+    memset(sb_block, 0, sb.block);
+    memcpy(sb_block, &sb, sizeof(sb));
+    // writing superblock
+    if (pwrite(fd, sb_block, 4096, 0) != 4096) {
+        printf("Error writing super-block to disk");
+        close(fd);
+        return 1;
+    }
+
+    struct store_inode inode = {0};
+    // inode inherits flags and compression from sb
+    inode.flags = sb.flags;
+    inode.compression = sb.compression;
+
+    off_t inode_off = (off_t)sb.inode_start * config.block_size;
+
+    for (uint32_t i = 0; i < n_inodes; i++) {
+        if (pwrite(fd, &inode, sizeof(inode),
+                inode_off + i * sizeof(inode)) != sizeof(inode)) {
+            perror("write inode");
+            close(fd);
+            return 1;
+        }
+    }
+
+
+    return 0;
+}
+
+
+// 1->YES; 0->NO
+int search(int argc, char **argv, const char* key) {
+    for(int i = 0; i < argc; i++) {
+        if (strcasecmp(argv[i], key)== 0)
+            return 1;
+    }
+    return 0;
+}
 
 int main(int argc, char **argv) {
     if (argc < 2) {
         usage(argv[0]);
         exit(EXIT_FAILURE);
     }
+    // this should only happen when the user does `store init` or `store rewrite`
     if (init_config(argc, argv)!= 0) {
         exit(EXIT_FAILURE);
+    }
+    // init process flow
+    if (search(argc, argv, "init")==1) {
+        printf("init\n");
+        // the user wants to init the disk
+        if (command_init()!=0) {
+            printf("Ran into errors while initiating disk!");
+            exit(EXIT_FAILURE);
+        }
+        printf("Disk %s initiated, can be used now\n", config.disk_name);
+        exit(EXIT_SUCCESS);
     }
 }
