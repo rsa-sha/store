@@ -2,12 +2,17 @@
 #define STORE_H
 
 #include <fcntl.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <errno.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <stdint.h>
+#include <sys/stat.h>
+// #include <sys/types.h>
+#include <sys/vfs.h>
 #include <unistd.h>
 
 #include "tomlc99/toml.h"
@@ -46,6 +51,7 @@ struct store_super_block {
     uint32_t block;           // block size
     uint32_t inode_start;     // block index
     uint32_t inode_end;       // block index
+    uint64_t data_space_left; // available space for Writing
 
     uint32_t data_start;      // block index
     uint8_t compression;      // ENUM compression
@@ -80,6 +86,13 @@ enum inode_ratio {
     SMALL=40,
 };
 
+// Data source enum to know where's data is coming from
+enum data_in {
+    D_INV = 0,
+    D_STR = 1,
+    D_FIL = 2,
+} data_in;
+
 // config struct to populate from user [store.toml]
 struct store_config {
     int                 compression;    // is compression enabled for all of disk
@@ -88,6 +101,12 @@ struct store_config {
     char                usage[16];      // to get inode ratio
     int                 block_size;     // to be given in SB, if not 4KB by default
     enum inode_ratio    ratio;          // computed from inode_ratio and config.usage
+    bool                populated;      // True if config read else False
 };
+
+
+// Other Macros
+#define PATH_MAX 512
+
 
 #endif
